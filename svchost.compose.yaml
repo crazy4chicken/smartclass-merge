@@ -1,0 +1,142 @@
+# svchost compose for the SmartClass dispatch fleet.
+# Field semantics: https://github.com/crazy4chicken/nekostick-svchost/blob/main/docs/compose.md
+#
+# strictSources is intentionally omitted (it defaults to false): a single
+# source.sha256 cannot cover every architecture at once, because the per-arch
+# ZIP assets have different digests. Pin sha256 only for a single-architecture
+# deployment, or set strictSources: true together with a matching digest.
+serviceScope: global
+
+services:
+  teamusers:
+    source:
+      release: "github:crazy4chicken/nsc-teamusers@v0.2.1" # asset teamusers_<version>_<arch>.zip, entry binary `teamusers`
+      # sha256: "..." # optional single-arch pin; otherwise svchost verifies against the GitHub asset digest
+    args: ["run"]
+    env:
+      TEAMUSERS_CONNECTION_STRING: "${HOST:TEAMUSERS_CONNECTION_STRING}"
+      TEAMUSERS_KEY_DIR: /var/lib/teamusers/keys # persistent and writable; never point it at artifacts/ or tmp/
+      TEAMUSERS_NODE_ID: teamusers
+      TEAMUSERS_TOKEN_AUDIENCE: nekostick # MUST equal MERGE_TEAMUSERS_AUD and WEBCAM_TEAMUSERS_AUD
+      TEAMUSERS_LOG_LEVEL: info
+      # The listen address comes from the Host launch values; override with
+      # TEAMUSERS_LISTEN_ADDRESS / TEAMUSERS_LISTEN_PORT if this deployment needs fixed values.
+    start: eager # authentication is on the fleet's critical path, start with the host
+    restart: on-failure
+    health:
+      type: http
+      path: /healthz
+      timeout: 5s
+    route:
+      prefix: /iam
+      strip: true # /iam/auth/login reaches the child process as /auth/login
+
+  filewarehouse:
+    source:
+      release: "github:crazy4chicken/nsc-filewarehouse@v0.1.0" # module nsc-filehouse; entry binary `filewarehouse`
+      # sha256: "..." # optional single-arch pin
+    args: ["run"]
+    env:
+      FILEHOUSE_DSN: "${HOST:FILEHOUSE_DSN}"
+      FILEHOUSE_ADDR: "${HOST}"
+      FILEHOUSE_PORT: "${PORT}"
+      FILEHOUSE_BLOB_DIR: /var/lib/filehouse/blobs # persistent and writable; the segments and photos live here
+      FILEHOUSE_KEY_DIR: /var/lib/filehouse/keys
+      FILEHOUSE_NODE_ID: filewarehouse
+      FILEHOUSE_PUBLIC_BASE_URL: "https://files.example.com/files" # public origin, route prefix included
+      FILEHOUSE_TEAMUSERS_BASE_URL: "http://${HOST@teamusers}:${PORT@teamusers}"
+      FILEHOUSE_TEAMUSERS_ISSUER: teamusers
+      FILEHOUSE_TEAMUSERS_AUDIENCE: nekostick
+      FILEHOUSE_TEAMUSERS_CLIENT_ID: filehouse-svc
+      FILEHOUSE_TEAMUSERS_CLIENT_SECRET: "${HOST:FILEHOUSE_TEAMUSERS_CLIENT_SECRET}"
+    start: eager # applies migrations at startup, before the first upload
+    restart: on-failure
+    health:
+      type: http
+      path: /healthz
+      timeout: 5s
+    route:
+      prefix: /files
+      strip: true
+
+  webcam-server:
+    source:
+      release: "github:crazy4chicken/smartclass-webcam-server@v0.2.0"
+    env:
+      WEBCAM_LISTEN_ADDR: "${HOST}:${PORT}" # the Host assigns the port for this launch
+      WEBCAM_DB_URL: "${HOST:WEBCAM_DB_URL}"
+      WEBCAM_TEAMUSERS_URL: "http://${HOST@teamusers}:${PORT@teamusers}"
+      WEBCAM_TEAMUSERS_AUD: nekostick
+      WEBCAM_TEAMUSERS_CLIENT_ID: webcam-server-svc
+      WEBCAM_TEAMUSERS_CLIENT_SECRET: "${HOST:WEBCAM_TEAMUSERS_CLIENT_SECRET}"
+      WEBCAM_FILEHOUSE_URL: "http://${HOST@filewarehouse}:${PORT@filewarehouse}" # internal address, no route prefix; the media sink — omit it and webcam-server falls back to S3, then to noop (nothing is stored)
+      WEBCAM_FILEHOUSE_BUCKET: webcam-segments
+      WEBCAM_WS_TICKET_TTL: 60s
+    start: eager
+    restart: on-failure
+    health:
+      type: http
+      path: /readyz # also covers the Postgres connection
+      timeout: 5s
+    route:
+      prefix: /webcam
+      strip: true # see the device-plane note below before publishing this prefix
+
+  dispatchub:
+    source:
+      release: "github:crazy4chicken/smartclass-dispatchub@v0.1.0"
+      # Before the first release exists, bootstrap from a local binary instead:
+      # path: /opt/dispatchub/dispatchub
+    env:
+      DISPATCH_LISTEN_ADDR: "${HOST}:${PORT}"
+      DISPATCH_DSN: "${HOST:DISPATCH_DSN}"
+      DISPATCH_TIMEZONE: Asia/Shanghai
+      DISPATCH_TEAMUSERS_URL: "http://${HOST@teamusers}:${PORT@teamusers}"
+      DISPATCH_TEAMUSERS_ISSUER: teamusers
+      DISPATCH_TEAMUSERS_AUD: nekostick
+      DISPATCH_TEAMUSERS_CLIENT_ID: dispatchub-svc
+      DISPATCH_TEAMUSERS_CLIENT_SECRET: "${HOST:DISPATCH_TEAMUSERS_CLIENT_SECRET}"
+      DISPATCH_WEBCAM_URL: "http://${HOST@webcam-server}:${PORT@webcam-server}" # same-namespace service reference
+      DISPATCH_PRESTART: 2m
+      DISPATCH_POSTSTOP_GRACE: 15s
+      DISPATCH_LOG_LEVEL: info
+    start: eager # the scheduler must be up before the first lesson window
+    restart: on-failure # fatal errors exit non-zero; use `always` if a clean exit should also be restarted
+    health:
+      type: http
+      path: /healthz
+      timeout: 5s
+    route:
+      prefix: /dispatch
+      strip: true # /dispatch/api/v1/... reaches the child process as /api/v1/...
+
+  merge:
+    source:
+      release: "github:crazy4chicken/smartclass-merge@v0.1.0"
+      # Before the first release exists, bootstrap from a local binary instead:
+      # path: /opt/merge/merge
+    args: ["run"]
+    env:
+      MERGE_LISTEN_ADDR: "${HOST}:${PORT}"
+      MERGE_DSN: "${HOST:MERGE_DSN}"
+      MERGE_TEAMUSERS_URL: "http://${HOST@teamusers}:${PORT@teamusers}"
+      MERGE_TEAMUSERS_ISSUER: teamusers
+      MERGE_TEAMUSERS_AUD: nekostick # MUST equal TEAMUSERS_TOKEN_AUDIENCE
+      MERGE_TEAMUSERS_CLIENT_ID: merge-svc
+      MERGE_TEAMUSERS_CLIENT_SECRET: "${HOST:MERGE_TEAMUSERS_CLIENT_SECRET}"
+      MERGE_FILEHOUSE_URL: "http://${HOST@filewarehouse}:${PORT@filewarehouse}" # internal address, no route prefix
+      MERGE_SOURCE_BUCKET: webcam-segments
+      MERGE_DEST_BUCKET: recordings # must exist in filewarehouse; the merged video is written here
+      MERGE_WORK_DIR: /var/lib/merge/work # persistent and writable; holds each job's temp video, size it for one recording per concurrent job
+      MERGE_MAX_CONCURRENT_JOBS: "1" # one merge at a time; raise it only with CPU and disk headroom
+      MERGE_LOG_LEVEL: info
+      # MERGE_FFMPEG_PATH: /usr/bin/ffmpeg # uncomment to use a host ffmpeg instead of the embedded build
+    start: eager # the queue should drain as soon as a recording stops producing segments
+    restart: on-failure # fatal errors exit non-zero; use `always` if a clean exit should also be restarted
+    health:
+      type: http
+      path: /readyz # covers Postgres, the work dir and the ffmpeg extraction; the first probe extracts the payload
+      timeout: 15s
+    route:
+      prefix: /merge
+      strip: true # /merge/api/v1/... reaches the child process as /api/v1/...

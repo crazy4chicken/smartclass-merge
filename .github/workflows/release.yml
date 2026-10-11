@@ -1,0 +1,126 @@
+# Release: pushing a v* tag builds one archive per platform and publishes it.
+#
+# Two contracts meet here:
+#   - svchost release sources (4-segment naming, see
+#     https://github.com/crazy4chicken/nekostick-svchost/blob/main/docs/publishing.md):
+#     each asset is named merge_<version>_<platform>_<arch>.zip and the entry
+#     binary sits at the ZIP root under the exact service name "merge"
+#     (Windows also accepts merge.exe), so the fleet's compose file can resolve
+#     `github:crazy4chicken/smartclass-merge@vX.Y.Z`.
+#   - the embedded ffmpeg: the payload is a build-time input (`go:embed`), so the
+#     workflow fetches the build for the target platform before compiling and the
+#     archive ships as one self-contained binary.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (vX.Y.Z)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, platform: linux, arch: x64, bin: merge }
+          - { goos: linux, goarch: arm64, platform: linux, arch: arm64, bin: merge }
+          - { goos: windows, goarch: amd64, platform: windows, arch: x64, bin: merge.exe }
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      PLATFORM: ${{ matrix.platform }}
+      ARCH: ${{ matrix.arch }}
+      BIN: ${{ matrix.bin }}
+    steps:
+      - name: Resolve version
+        run: |
+          TAG="${{ inputs.version || github.ref_name }}"
+          echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "version must look like vX.Y.Z, got: $TAG"; exit 1; }
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The embedded ffmpeg is fetched for this matrix entry only: everything in
+      # internal/ffmpeg/bin/ is embedded by the build, so a stray payload of
+      # another platform would only make the binary bigger.
+      - name: Fetch the embedded ffmpeg
+        run: go run ./cmd/fetchffmpeg -os "$GOOS" -arch "$GOARCH"
+
+      - name: Build
+        run: |
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=$TAG" \
+            -o "dist/$BIN" ./cmd/merge
+
+      - name: Package
+        run: |
+          cd dist
+          zip "merge_${TAG}_${PLATFORM}_${ARCH}.zip" "$BIN"
+
+      # archive: false uploads the ZIP as-is (the file name becomes the
+      # artifact name), which the publish job matches by pattern.
+      - name: Upload asset
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: dist/*.zip
+          archive: false
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        run: |
+          TAG="${{ inputs.version || github.ref_name }}"
+          echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "version must look like vX.Y.Z, got: $TAG"; exit 1; }
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      # skip-decompress: the uploads are raw .zip files (archive: false);
+      # without this the client would unzip them and every platform would
+      # clobber the same bare "merge"/"merge.exe" entry.
+      - name: Download assets
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: merge_*.zip
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+
+      # On manual dispatch the tag may not exist yet: gh release create
+      # creates it at --target, which is the dispatched commit. Passing the
+      # full SHA also keeps target_commitish a commit rather than a branch
+      # name, so a commit-prefix ref can resolve the release (publishing.md).
+      # GH_REPO substitutes for the missing git checkout in this job.
+      #
+      # The archives embed a GPL FFmpeg build, so the release body states the
+      # corresponding-source location.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" --title "$TAG" --target "${{ github.sha }}" --generate-notes \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" dist/*.zip --clobber
+          gh release view "$TAG" --json body -q .body > notes.md
+          printf '\n### Bundled FFmpeg\n\nEvery archive embeds a static **GPL** FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds); redistributing these archives is subject to the GPL, and the corresponding source is published there. Set `MERGE_FFMPEG_PATH` to run against a host ffmpeg instead.\n' >> notes.md
+          gh release edit "$TAG" --notes-file notes.md

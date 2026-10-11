@@ -1,0 +1,29 @@
+# Build output
+/merge
+/merge.exe
+/fetchffmpeg
+/fetchffmpeg.exe
+/bin/
+/dist/
+
+# Embedded ffmpeg payloads; fetch them with `go run ./cmd/fetchffmpeg`
+/internal/ffmpeg/bin/*
+!/internal/ffmpeg/bin/.gitkeep
+!/internal/ffmpeg/bin/README.md
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# Docs site
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+docs/public/openapi.yaml
+
+# Local tooling
+*.local
+.env
+.env.*
+!.env.example

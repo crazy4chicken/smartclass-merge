@@ -1,0 +1,35 @@
+# Test: formatting, vet and a full build on every push.
+#
+# The embedded ffmpeg payloads are build-time inputs, not sources: this
+# checkout has none, and `go:embed` tolerates a payload-less bin/ directory, so
+# the build passes here and the release workflow is the only place that fetches
+# a payload.
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...

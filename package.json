@@ -1,0 +1,26 @@
+{
+  "name": "smartclass-merge",
+  "version": "0.1.0",
+  "description": "SmartClass merge service - docs tooling",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "predocs:dev": "go run ./cmd/genspec",
+    "predocs:build": "go run ./cmd/genspec"
+  },
+  "keywords": [],
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.6.0",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.6.0",
+  "type": "module",
+  "devDependencies": {
+    "teamusers-apidocs-vitepress": "^0.1.0",
+    "vitepress": "^1.6.4"
+  }
+}
